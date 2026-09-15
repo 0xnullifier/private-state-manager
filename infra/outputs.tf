@@ -254,7 +254,7 @@ output "guardian_metrics_enabled" {
 }
 
 output "cloudwatch_metrics_enabled" {
-  description = "Whether the ADOT metrics sidecar, dashboard, and alarms are deployed (cascades off with the metrics endpoint)"
+  description = "Whether the ADOT metrics sidecar, dashboard, and metric-based alarms are deployed (cascades off with the metrics endpoint; the log-based alarm is gated separately)"
   value       = local.cloudwatch_metrics_enabled
 }
 
@@ -296,4 +296,19 @@ output "alarm_slack_configuration_name" {
 output "alarm_slack_configuration_arn" {
   description = "ARN of the Amazon Q Developer in chat applications Slack channel configuration for this stack's alarms, empty when not configured"
   value       = local.alarm_slack_enabled ? aws_chatbot_slack_channel_configuration.alarms[0].chat_configuration_arn : ""
+}
+
+output "cloudwatch_log_alarms_enabled" {
+  description = "Whether the server log group's ERROR metric filter and log-errors alarm are deployed (the WARN filter additionally needs the dashboard)"
+  value       = var.cloudwatch_log_alarms_enabled
+}
+
+output "log_metrics_namespace" {
+  description = "CloudWatch namespace receiving the server log-level metric-filter counts (<metrics_namespace>/Logs)"
+  value       = var.cloudwatch_log_alarms_enabled ? local.log_metrics_namespace : ""
+}
+
+output "server_log_errors_alarm_name" {
+  description = "Name of the alarm on ERROR-level server log lines for this stack"
+  value       = var.cloudwatch_log_alarms_enabled ? aws_cloudwatch_metric_alarm.server_log_errors[0].alarm_name : ""
 }

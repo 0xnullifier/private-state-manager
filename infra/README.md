@@ -28,6 +28,7 @@ Resources created:
 - ADOT Collector sidecar in the server task exporting Guardian Prometheus metrics to CloudWatch (EMF)
 - CloudWatch dashboard (`<stack>-server`) and alarms (error rate, latency, canonicalization, metrics pipeline, ECS saturation)
 - Optional SNS topic (`<stack>-alarms`) receiving every alarm's ALARM/OK transitions, and an optional Amazon Q Developer in chat applications (formerly AWS Chatbot) Slack channel configuration subscribed to it (`alerting.tf`)
+- CloudWatch Logs metric filters counting the server's ERROR (and, with the dashboard, WARN) log lines, with an alarm on sustained ERROR output (independent of the metrics pipeline; requires JSON logs)
 
 The Guardian metrics endpoint binds loopback inside the task's shared network
 namespace; only the sidecar can reach it — it is never exposed via the ALB or
@@ -289,7 +290,7 @@ aws ecr delete-repository --repository-name "$ECR_REPO_NAME" --force --region "$
 | `guardian_log_format` | `json` | Log format for `GUARDIAN_LOG_FORMAT` (`text`, `json`, `compact`) |
 | `log_retention_days` | `7` | CloudWatch log retention in days for the cluster and server groups (prod pins them to 365) and for the EMF metrics group |
 | `guardian_metrics_enabled` | `true` | Guardian Prometheus metrics endpoint (loopback-only inside the task) |
-| `cloudwatch_metrics_enabled` | `true` | ADOT sidecar + EMF export + CloudWatch dashboard/alarms (cascades off when the endpoint is disabled) |
+| `cloudwatch_metrics_enabled` | `true` | ADOT sidecar + EMF export + CloudWatch dashboard/metric-based alarms (cascades off when the endpoint is disabled; the log-based alarm is gated separately) |
 | `adot_image` | pinned ADOT Collector release | Digest-pinned sidecar image |
 | `metrics_namespace` | `<Title(stack_name)>/Server` | CloudWatch namespace for application metrics |
 | `alarm_actions` | `[]` | ARNs (e.g. SNS topics) notified on alarm/ok transitions, in addition to the managed topic |
@@ -300,6 +301,8 @@ aws ecr delete-repository --repository-name "$ECR_REPO_NAME" --force --region "$
 | `alarm_latency_threshold_seconds` | `1` | Average HTTP latency alarm threshold |
 | `alarm_cpu_threshold_percent` | `85` | ECS CPU saturation alarm threshold |
 | `alarm_memory_threshold_percent` | `90` | ECS memory saturation alarm threshold |
+| `cloudwatch_log_alarms_enabled` | `true` | ERROR log metric filter on the server log group + log-errors alarm (plus a WARN filter when the dashboard exists); requires `guardian_log_format = "json"` (plan-time check) |
+| `alarm_log_error_threshold` | `0` | ERROR log lines per 5-minute period tolerated before a period counts as breaching (two consecutive periods alarm) |
 
 ## Outputs
 
@@ -334,7 +337,7 @@ aws ecr delete-repository --repository-name "$ECR_REPO_NAME" --force --region "$
 | `guardian_dashboard_commitment_rate_burst_per_sec` | Effective fleet-wide dashboard per-commitment burst budget |
 | `guardian_dashboard_commitment_rate_per_min` | Effective fleet-wide dashboard per-commitment sustained budget |
 | `guardian_metrics_enabled` | Whether the Guardian Prometheus metrics endpoint is enabled |
-| `cloudwatch_metrics_enabled` | Whether the metrics sidecar, dashboard, and alarms are deployed |
+| `cloudwatch_metrics_enabled` | Whether the metrics sidecar, dashboard, and metric-based alarms are deployed |
 | `metrics_missing_alarm_name` | Name of the metrics-pipeline heartbeat alarm |
 | `metrics_namespace` | CloudWatch namespace receiving Guardian application metrics |
 | `metrics_dashboard_name` | CloudWatch dashboard name |
@@ -343,6 +346,9 @@ aws ecr delete-repository --repository-name "$ECR_REPO_NAME" --force --region "$
 | `alarm_sns_topic_arn` | Managed alarm SNS topic ARN, empty when not enabled |
 | `alarm_slack_configuration_name` | Amazon Q Slack channel configuration name (error log group `/aws/chatbot/<name>`), empty when not configured |
 | `alarm_slack_configuration_arn` | Amazon Q Slack channel configuration ARN, empty when not configured |
+| `cloudwatch_log_alarms_enabled` | Whether the ERROR log metric filter and log-errors alarm are deployed |
+| `log_metrics_namespace` | CloudWatch namespace receiving the log-level metric-filter counts (`<metrics_namespace>/Logs`) |
+| `server_log_errors_alarm_name` | Name of the alarm on ERROR-level server log lines |
 
 ## Stage Profiles
 
