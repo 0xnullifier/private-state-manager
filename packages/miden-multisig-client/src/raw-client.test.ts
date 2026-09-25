@@ -37,26 +37,65 @@ describe('raw-client', () => {
     );
   });
 
-  it('rejects shadow client creation without an RPC endpoint', async () => {
+  // A `MidenClient` whose `_withInnerWebClient` behaves like the SDK's: it runs
+  // `fn` with the wrapped WASM client and records whether a call is inside it.
+  const publicClientWrapping = (inner: Record<string, unknown>) => {
+    const slot = { depth: 0 };
+    const withInnerWebClient = vi.fn(async (fn: (inner: unknown) => Promise<unknown>) => {
+      slot.depth += 1;
+      try {
+        return await fn(inner);
+      } finally {
+        slot.depth -= 1;
+      }
+    });
     const client = {
       accounts: {},
       sync: vi.fn(),
       defaultProver: null,
-      storeIdentifier: vi.fn(() => 'browser-db'),
+      storeIdentifier: vi.fn(async () => 'browser-db'),
+      _withInnerWebClient: withInnerWebClient,
     };
+    return { client, slot, withInnerWebClient };
+  };
 
-    await expect(getRawMidenClient(client as any)).rejects.toThrow(
-      'missing required configuration: midenRpcEndpoint',
-    );
-    await expect(getRawMidenClient(client as any, '   ')).rejects.toThrow(
-      'missing required configuration: midenRpcEndpoint',
-    );
+  it('uses the WASM client the MidenClient wraps and opens no second client', async () => {
+    const inner = {
+      getAccount: vi.fn(async function (this: unknown, id: string) {
+        return { id, self: this };
+      }),
+    };
+    const { client } = publicClientWrapping(inner);
+
+    const rawClient = await getRawMidenClient(client as any);
+    const account = await rawClient.getAccount('0xabc' as any);
+
+    expect(inner.getAccount).toHaveBeenCalledWith('0xabc');
+    expect(account).toEqual({ id: '0xabc', self: inner });
+    // A second client on the same store keeps its own storage-map trees and
+    // can persist a stale root (issue #481).
     expect(mockCreateClient).not.toHaveBeenCalled();
   });
 
-  it('opens the shadow client on the parent store', async () => {
-    const rawClient = { kind: 'raw' };
-    mockCreateClient.mockResolvedValue(rawClient);
+  it("runs every call inside the MidenClient's own queue", async () => {
+    const depthDuringCall: number[] = [];
+    const { client, slot, withInnerWebClient } = publicClientWrapping({
+      syncState: vi.fn(async () => {
+        depthDuringCall.push(slot.depth);
+        return { blockNum: 7 };
+      }),
+    });
+
+    const rawClient = await getRawMidenClient(client as any);
+    const callsBefore = withInnerWebClient.mock.calls.length;
+    await expect(rawClient.syncState()).resolves.toEqual({ blockNum: 7 });
+
+    expect(depthDuringCall).toEqual([1]);
+    expect(withInnerWebClient.mock.calls.length).toBe(callsBefore + 1);
+    expect(slot.depth).toBe(0);
+  });
+
+  it('refuses a MidenClient that does not expose its WASM client', async () => {
     const client = {
       accounts: {},
       sync: vi.fn(),
@@ -64,13 +103,10 @@ describe('raw-client', () => {
       storeIdentifier: vi.fn(async () => 'browser-db'),
     };
 
-    await expect(getRawMidenClient(client as any, 'http://localhost:57291')).resolves.toBe(
-      rawClient,
+    await expect(getRawMidenClient(client as any)).rejects.toThrow(
+      'MidenClient does not expose _withInnerWebClient',
     );
-    expect(mockCreateClient).toHaveBeenCalledTimes(1);
-    const args = mockCreateClient.mock.calls[0];
-    expect(args[0]).toBe('http://localhost:57291');
-    expect(args[3]).toBe('browser-db');
+    expect(mockCreateClient).not.toHaveBeenCalled();
   });
 
   it('returns an injected raw web client without needing an endpoint', async () => {
@@ -104,31 +140,14 @@ describe('raw-client', () => {
     expect(getTransactionProver(rawClient as any)).toBeNull();
   });
 
-  it('creates and caches a raw client for a public MidenClient', async () => {
-    const rawClient = { kind: 'raw-client' };
-    const client = {
-      accounts: {},
-      sync: vi.fn(),
-      defaultProver: null,
-      storeIdentifier: vi.fn(() => 'browser-db'),
-    };
+  it('caches the shared raw client for a public MidenClient', async () => {
+    const { client } = publicClientWrapping({ getAccount: vi.fn() });
 
-    mockCreateClient.mockResolvedValue(rawClient);
+    const first = await getRawMidenClient(client as any);
+    const second = await getRawMidenClient(client as any);
 
-    await expect(
-      getRawMidenClient(client as any, 'https://rpc.devnet.miden.io'),
-    ).resolves.toBe(rawClient);
-    await expect(
-      getRawMidenClient(client as any, 'https://rpc.devnet.miden.io'),
-    ).resolves.toBe(rawClient);
-
-    expect(mockCreateClient).toHaveBeenCalledTimes(1);
-    expect(mockCreateClient).toHaveBeenCalledWith(
-      'https://rpc.devnet.miden.io',
-      undefined,
-      undefined,
-      'browser-db',
-    );
+    expect(second).toBe(first);
+    expect(mockCreateClient).not.toHaveBeenCalled();
   });
 
   it('uses the public compile resource when available', async () => {
