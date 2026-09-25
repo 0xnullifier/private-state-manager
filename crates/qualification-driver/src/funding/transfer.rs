@@ -23,7 +23,7 @@ pub async fn send(
     let asset = FungibleAsset::new(faucet, amount)
         .map_err(|error| anyhow!("{amount} of {faucet} is not a valid asset: {error}"))?;
 
-    let payment = PaymentNoteDescription::new(vec![Asset::Fungible(asset)], treasury, recipient);
+    let payment = PaymentNoteDescription::new(vec![Asset::from(asset)], treasury, recipient);
 
     let request = TransactionRequestBuilder::new()
         .build_pay_to_id(payment, NoteType::Public, client.rng())

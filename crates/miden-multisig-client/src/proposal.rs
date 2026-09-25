@@ -8,7 +8,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use guardian_client::DeltaObject;
 use guardian_shared::FromJson;
 use guardian_shared::hex::FromHex;
-use guardian_shared::{ProposalSignature, SignatureScheme};
+use guardian_shared::{EcdsaMessageFormat, ProposalSignature, SignatureScheme};
 use miden_protocol::Word;
 use miden_protocol::account::AccountId;
 use miden_protocol::crypto::dsa::ecdsa_k256_keccak::{
@@ -415,16 +415,14 @@ impl ProposalMetadata {
 
     /// Converts salt hex to Word.
     ///
-    /// Errors when absent, for the same reason [`Self::chain_anchor`] does. The request
-    /// declares this salt and miden-client commits `hash(CONVERSION_INFO || SALT)` into
-    /// the auth arg from it, so a substituted zero would be committed just as happily as
-    /// the real one and reproduce a summary no cosigner signed.
+    /// Errors when absent, for the same reason [`Self::chain_anchor`] does: the salt
+    /// is bound into the auth args and the signed summary, so a substituted zero
+    /// would rebuild a request whose summary no cosigner signed.
     pub fn salt(&self) -> Result<Word> {
         let value = self.salt_hex.as_deref().ok_or_else(|| {
             MultisigError::InvalidConfig(
-                "proposal metadata has no salt; its request cannot be rebuilt because \
-                 the auth arg commits hash(CONVERSION_INFO || SALT) and is not \
-                 invertible to the salt"
+                "proposal metadata has no salt; its request cannot be rebuilt without the \
+                 salt the auth args and summary bind"
                     .to_string(),
             )
         })?;
@@ -636,6 +634,7 @@ pub struct ProposalSignatureEntry {
     pub signature_hex: String,
     pub scheme: SignatureScheme,
     pub public_key_hex: Option<String>,
+    pub message_format: EcdsaMessageFormat,
 }
 
 impl ProposalSignatureEntry {
@@ -645,6 +644,11 @@ impl ProposalSignatureEntry {
         let signature_hex = ensure_hex_prefix(&self.signature_hex);
         match self.scheme {
             SignatureScheme::Falcon => {
+                if self.message_format != EcdsaMessageFormat::Raw {
+                    return Err(MultisigError::Signature(
+                        "EIP-712 requires an ECDSA signer".to_string(),
+                    ));
+                }
                 Poseidon2FalconSignature::from_hex(&signature_hex).map_err(|e| {
                     MultisigError::Signature(format!("invalid proposal signature: {}", e))
                 })?;
@@ -827,17 +831,23 @@ impl Proposal {
         let mut seen_signers = HashSet::new();
         let mut signatures = Vec::with_capacity(payload.signatures.len());
         for signature in &payload.signatures {
-            let (scheme, signature_hex, public_key_hex) = match &signature.signature {
-                ProposalSignature::Falcon { signature } => {
-                    (SignatureScheme::Falcon, signature.clone(), None)
-                }
+            let (scheme, signature_hex, public_key_hex, message_format) = match &signature.signature
+            {
+                ProposalSignature::Falcon { signature } => (
+                    SignatureScheme::Falcon,
+                    signature.clone(),
+                    None,
+                    EcdsaMessageFormat::Raw,
+                ),
                 ProposalSignature::Ecdsa {
                     signature,
                     public_key,
+                    message_format,
                 } => (
                     SignatureScheme::Ecdsa,
                     signature.clone(),
                     public_key.clone(),
+                    *message_format,
                 ),
             };
 
@@ -846,6 +856,7 @@ impl Proposal {
                 signature_hex,
                 scheme,
                 public_key_hex,
+                message_format,
             };
             entry.validate()?;
 
@@ -1039,9 +1050,10 @@ mod tests {
             delta,
             InputNotes::new(Vec::new()).unwrap(),
             RawOutputNotes::new(Vec::new()).unwrap(),
+            miden_protocol::block::BlockNumber::from(0),
             Word::default(),
             0,
-            TransactionSummaryUserParams::new([Felt::ZERO; 7]),
+            TransactionSummaryUserParams::new([Felt::ZERO; 6]),
         )
     }
 

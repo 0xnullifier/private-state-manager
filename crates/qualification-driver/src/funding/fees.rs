@@ -24,9 +24,11 @@ pub async fn observe(client: &MidenClient) -> anyhow::Result<FeeModel> {
         .get_latest_block_header()
         .await
         .map_err(|error| anyhow!("cannot read the chain tip: {error}"))?;
-    let parameters = header.fee_parameters();
+    let faucet = miden_multisig_client::synced_fee_faucet_id(client)
+        .await
+        .map_err(|error| anyhow!("cannot read the fee asset from the protocol config: {error}"))?;
     Ok(FeeModel {
-        faucet: parameters.fee_faucet_id(),
-        verification_base_fee: parameters.verification_base_fee(),
+        faucet,
+        verification_base_fee: header.fee_parameters().verification_base_fee(),
     })
 }

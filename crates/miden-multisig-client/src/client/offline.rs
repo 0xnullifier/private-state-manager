@@ -74,10 +74,11 @@ impl MultisigClient {
             }
         };
 
+        let auth_args = self.multisig_auth_args(salt, None, None).await?;
         let tx_request = crate::transaction::build_update_guardian_transaction_request(
             new_commitment,
             self.key_manager.scheme(),
-            salt,
+            &auth_args,
             std::iter::empty(),
         )?;
 
@@ -110,6 +111,7 @@ impl MultisigClient {
                 signature: signature_hex,
                 scheme: self.key_manager.scheme(),
                 public_key_hex: proposal_public_key_hex(self.key_manager.as_ref()),
+                message_format: guardian_shared::EcdsaMessageFormat::Raw,
             }],
             signatures_required,
             metadata,
@@ -178,6 +180,7 @@ impl MultisigClient {
             signature: signature_hex,
             scheme: self.key_manager.scheme(),
             public_key_hex: proposal_public_key_hex(self.key_manager.as_ref()),
+            message_format: guardian_shared::EcdsaMessageFormat::Raw,
         })?;
 
         Ok(())
@@ -262,6 +265,7 @@ impl MultisigClient {
                 signature_hex: sig.signature.clone(),
                 scheme: sig.scheme,
                 public_key_hex: sig.public_key_hex.clone(),
+                message_format: sig.message_format,
             })
             .collect();
 
@@ -272,6 +276,7 @@ impl MultisigClient {
             signature_inputs,
             &required_commitments,
             tx_summary_commitment,
+            Some(&tx_summary),
         )?;
 
         // Cosigner signatures come from the document; the acknowledgement comes
@@ -291,20 +296,24 @@ impl MultisigClient {
             signature_advice.push(guardian_advice);
         }
 
-        // Build the final transaction request with all signatures
-        let salt = proposal.metadata.salt()?;
-
         // Execute and finalize at the proposal's anchored reference block; the
         // anchor was checked against the signed summary's block commitment in
-        // `verify_proposal_summary_binding` above. It also carries the fee
-        // faucet used to derive native fee conversion info during execution.
+        // `verify_proposal_summary_binding` above.
         let chain_anchor = proposal.metadata.chain_anchor()?;
+        self.assert_approval_not_expired(&proposal.id, &proposal.tx_summary)
+            .await?;
+        let auth_args = crate::transaction::proposal_auth_args(
+            &self.miden_client,
+            &proposal.tx_summary,
+            &chain_anchor,
+        )
+        .await?;
 
         let final_tx_request = build_final_transaction_request(
             &self.miden_client,
             &proposal.transaction_type,
             account.inner(),
-            salt,
+            &auth_args,
             signature_advice,
             None,
             None,

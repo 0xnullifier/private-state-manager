@@ -1801,7 +1801,7 @@ function labelOf(metadata: { proposalType: string; rawProposalType?: string }): 
  * in the Rust driver.
  */
 export async function createCustomProposal(
-  _context: ActionContext,
+  context: ActionContext,
   scenarioId: string,
 ): Promise<ActionOutcome> {
   const session = sessions.get(scenarioId);
@@ -1817,11 +1817,13 @@ export async function createCustomProposal(
 
     // Built and serialized here rather than through the typed API, because
     // producer-supplied bytes are the thing being qualified.
-    const { request } = buildP2idTransactionRequest(
+    const { request } = await buildP2idTransactionRequest(
+      session.cosigners[0].midenClient,
       session.accountId,
       session.treasuryId,
       session.faucetId,
       P2ID_AMOUNT,
+      { midenRpcEndpoint: context.live!.midenRpcEndpoint },
     );
     const bytes = request.serialize();
 

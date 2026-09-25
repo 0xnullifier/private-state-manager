@@ -7,7 +7,6 @@ use miden_client::keystore::FilesystemKeyStore;
 use miden_client::rpc::Endpoint;
 use miden_client_sqlite_store::SqliteStore;
 use miden_protocol::account::{Account, AccountId};
-use miden_protocol::asset::Asset;
 use miden_protocol::crypto::rand::RandomCoin;
 
 use crate::manifest::NetworkName;
@@ -112,10 +111,8 @@ pub fn vault_balances(account: &Account) -> Vec<(AccountId, u64)> {
     account
         .vault()
         .assets()
-        .filter_map(|asset| match asset {
-            Asset::Fungible(fungible) => Some((fungible.faucet_id(), fungible.amount().as_u64())),
-            Asset::NonFungible(_) => None,
-        })
+        .filter_map(|asset| asset.as_fungible())
+        .map(|fungible| (fungible.faucet_id(), fungible.amount().as_u64()))
         .collect()
 }
 

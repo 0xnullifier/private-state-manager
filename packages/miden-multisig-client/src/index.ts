@@ -67,14 +67,21 @@ export { AccountInspector, type DetectedMultisigConfig, type VaultBalance } from
 export {
   chainAnchorFromBase64,
   chainAnchorToBase64,
+  chainAnchorBlockNum,
   executeForSummary,
   executeForSummaryAt,
-  summaryAuthArg,
+  summaryApprovalExpirationBlockNum,
+  summarySalt,
+  SummaryAnchorMismatchError,
   buildUpdateSignersTransactionRequest,
   buildUpdateProcedureThresholdTransactionRequest,
   buildUpdateGuardianTransactionRequest,
   buildConsumeNotesTransactionRequest,
+  buildConsumeNotesTransactionRequestFromNotes,
   buildP2idTransactionRequest,
+  requestBoundBlockNum,
+  requestSaltHex,
+  MAX_APPROVAL_EXPIRATION_DELTA,
   parseP2idNoteType,
   p2idNoteTypeToMetadata,
   type P2idTransactionOptions,
@@ -85,7 +92,12 @@ export {
 // serialized summary exactly as import verification does. Returns normalized
 // hex, directly comparable to `ExportedProposal.commitment` / `Proposal.id`.
 export { computeCommitmentFromTxSummary } from './multisig/helpers.js';
-export type { SignatureOptions } from './transaction/options.js';
+export type {
+  MidenClientMultisigRequestOptions,
+  MidenClientSignatureOptions,
+  MultisigRequestOptions,
+  SignatureOptions,
+} from './transaction/options.js';
 
 export { GuardianHttpClient, GuardianHttpError } from '@openzeppelin/guardian-client';
 export type { GuardianErrorMeta } from '@openzeppelin/guardian-client';
@@ -134,9 +146,12 @@ export type {
 export {
   FalconSigner,
   EcdsaSigner,
+  Eip712Signer,
+  LedgerSigner,
   ParaSigner,
   MidenWalletSigner,
   type ParaSigningContext,
+  type Eip1193SignerProvider,
   type WalletSigningContext,
 } from './signer.js';
 export { PublicKeyFormat } from './utils/key.js';
@@ -180,7 +195,7 @@ export {
 
 export {
   type AuthArgErrorCode,
-  ProposalAuthArgUnresolvableError,
+  MultisigAuthArgsMissingError,
   ProposalSaltMalformedError,
 } from './multisig/authArgErrors.js';
 

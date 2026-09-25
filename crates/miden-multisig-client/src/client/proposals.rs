@@ -53,7 +53,8 @@ use crate::execution::{
 use crate::keystore::proposal_public_key_hex;
 use crate::proposal::{Proposal, TransactionType, is_builtin_proposal_type};
 use crate::transaction::{
-    ProposalBuilder, deserialize_transaction_request, execute_for_summary, word_to_hex,
+    ProposalBuilder, ProposalOptions, deserialize_transaction_request, execute_for_summary,
+    proposal_auth_args, word_to_hex,
 };
 
 impl MultisigClient {
@@ -302,6 +303,10 @@ impl MultisigClient {
             ));
         }
 
+        let chain_anchor = proposal.metadata.chain_anchor()?;
+        self.assert_approval_not_expired(&proposal.id, &proposal.tx_summary)
+            .await?;
+
         let tx_summary_commitment = proposal.tx_summary.to_commitment();
 
         let mut signature_inputs: Vec<SignatureInput> = proposal
@@ -312,6 +317,7 @@ impl MultisigClient {
                 signature_hex: signature.signature_hex,
                 scheme: signature.scheme,
                 public_key_hex: signature.public_key_hex,
+                message_format: signature.message_format,
             })
             .collect();
 
@@ -328,6 +334,7 @@ impl MultisigClient {
             signature_inputs,
             &required_commitments,
             tx_summary_commitment,
+            Some(&proposal.tx_summary),
         )?;
 
         if proposal.transaction_type.requires_guardian_ack() {
@@ -376,9 +383,6 @@ impl MultisigClient {
             }
         }
 
-        // Build the final transaction request with all signatures
-        let salt = proposal.metadata.salt()?;
-
         // For signer-update transactions, we must propagate parse errors for signer commitments
         // rather than silently converting to None. This ensures malformed hex is diagnosed properly.
         let signer_commitments = if matches!(
@@ -392,18 +396,14 @@ impl MultisigClient {
             proposal.metadata.signer_commitments().ok()
         };
 
-        // Execute and finalize at the proposal's anchored reference block, so
-        // the summary the cosigners signed reproduces exactly. The anchor was
-        // already checked against the summary's block commitment when
-        // `get_proposal` verified the summary binding. It also carries the fee
-        // faucet used to derive native fee conversion info during execution.
-        let chain_anchor = proposal.metadata.chain_anchor()?;
+        let auth_args =
+            proposal_auth_args(&self.miden_client, &proposal.tx_summary, &chain_anchor).await?;
 
         let final_tx_request = build_final_transaction_request(
             &self.miden_client,
             &proposal.transaction_type,
             account.inner(),
-            salt,
+            &auth_args,
             signature_advice,
             proposal.metadata.new_threshold,
             signer_commitments.as_deref(),
@@ -452,7 +452,10 @@ impl MultisigClient {
             )));
         }
 
-        self.sync().await?;
+        // No sync here: the producer bound the request's auth args to the store's
+        // sync height when it built them, and the anchor captured below has to
+        // name that same block. A sync in between would move the anchor past the
+        // block the summary binds and `execute_for_summary` would refuse the pair.
         let account = self.require_account()?.clone();
         let account_id = account.id();
 
@@ -567,6 +570,9 @@ impl MultisigClient {
             )));
         }
 
+        self.assert_approval_not_expired(&proposal.id, &proposal.tx_summary)
+            .await?;
+
         let mut signature_inputs: Vec<SignatureInput> = proposal
             .signatures
             .into_iter()
@@ -575,6 +581,7 @@ impl MultisigClient {
                 signature_hex: signature.signature_hex,
                 scheme: signature.scheme,
                 public_key_hex: signature.public_key_hex,
+                message_format: signature.message_format,
             })
             .collect();
         signature_inputs.sort_by(|a, b| a.signer_commitment.cmp(&b.signer_commitment));
@@ -586,6 +593,7 @@ impl MultisigClient {
             signature_inputs,
             &required_commitments,
             tx_summary_commitment,
+            Some(&derived_summary),
         )?;
 
         if proposal.transaction_type.requires_guardian_ack() {
@@ -651,6 +659,17 @@ impl MultisigClient {
         &mut self,
         transaction_type: TransactionType,
     ) -> Result<Proposal> {
+        self.propose_transaction_with_options(transaction_type, ProposalOptions::default())
+            .await
+    }
+
+    /// Proposes a transaction with per-proposal settings, such as an approval
+    /// expiration. See [`ProposalOptions`].
+    pub async fn propose_transaction_with_options(
+        &mut self,
+        transaction_type: TransactionType,
+        options: ProposalOptions,
+    ) -> Result<Proposal> {
         // Sync with the network before executing transaction
         self.sync().await?;
 
@@ -660,6 +679,7 @@ impl MultisigClient {
 
         let node_rpc = self.node_rpc_client();
         ProposalBuilder::new(transaction_type)
+            .with_options(options)
             .build(
                 &mut self.miden_client,
                 &node_rpc,
@@ -874,10 +894,10 @@ mod tests {
             account_delta,
             InputNotes::new(Vec::new()).expect("empty input notes"),
             RawOutputNotes::new(Vec::new()).expect("empty output notes"),
+            miden_protocol::block::BlockNumber::from(0),
             Word::default(),
             0,
             TransactionSummaryUserParams::new([
-                ZERO,
                 ZERO,
                 ZERO,
                 Felt::new_unchecked(seed),

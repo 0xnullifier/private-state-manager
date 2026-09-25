@@ -22,6 +22,7 @@ matches your Miden node:
 
 | This package | Miden protocol |
 |---|---|
+| 0.18.x | 0.17.x |
 | 0.17.x | 0.16.x |
 | 0.16.x | 0.15.x |
 | 0.15.x | 0.15.x |
@@ -45,7 +46,7 @@ miden-multisig-client = { git = "https://github.com/OpenZeppelin/guardian", pack
 ```rust
 use miden_client::rpc::Endpoint;
 use miden_multisig_client::{MultisigClient, TransactionType};
-use miden_objects::{Word, account::AccountId};
+use miden_objects::Word;
 
 # async fn example() -> anyhow::Result<()> {
 let signer1: Word = /* your RPO Falcon commitment */ Word::default();
@@ -69,8 +70,9 @@ println!("Account registered on GUARDIAN endpoint: {}", client.guardian_endpoint
 
 On a network with a non-zero `verification_base_fee`, a new account needs the
 native fee asset before it can create or execute regular proposals. Send the
-account a note funded by the faucet identified in the block header's
-`fee_parameters.fee_faucet_id`, then consume that note through a
+account a note of the chain's fee asset (its faucet is the one the synced
+protocol configuration names, `synced_fee_faucet_id`), then consume that note
+through a
 `consume_notes` proposal. The bootstrap transaction can pay its fee from the
 note it consumes.
 
@@ -369,43 +371,66 @@ use miden_multisig_client::{
 };
 use miden_protocol::note::NoteType;
 
-// Producer: build a transaction and propose it under a custom label.
+// Producer: build a transaction and propose it under a custom label. The account's
+// auth procedure reads three words out of the request's auth argument since Miden
+// 0.17 (bound block and approval expiration, salt, fee conversion info); the client
+// builds them, bound to its sync height, and the builder attaches them. Sync first:
+// `propose_custom_transaction` anchors the proposal at that same height and does
+// not sync again, because a sync between build and propose would move the anchor
+// past the block the request binds.
+client.sync().await?;
 let salt = generate_salt();
+let auth_args = client.multisig_auth_args(salt, None, None).await?;
 let mut request = build_p2id_transaction_request(
     account.inner(),
     recipient,
     vec![asset],
     NoteType::Public,
     P2ideHeights::default(),
-    salt,
+    &auth_args,
     std::iter::empty(),
 )?;
 let proposal = client.propose_custom_transaction(&request.to_bytes(), "b2agg").await?;
+let bound_block_num = proposal.metadata.chain_anchor()?.block_num();
 
 // Cosigners review and sign through the usual list/sign flow.
 
-// Producer (once threshold is met): bind-check the request, fetch the validated
-// advice, inject it into the request, and submit. `prepare_custom_execution`
-// verifies the request against the signed commitment *before* the GUARDIAN ack,
-// re-executing at the proposal's anchored reference block; `submit_transaction`
-// takes the proposal id to execute at that same anchor, since the collected
-// signatures only authorize the summary produced there.
+// Producer (once threshold is met): rebuild the request from the recipe at the
+// proposal's anchor block, bind-check it, fetch the validated advice, inject it,
+// and submit. `prepare_custom_execution` verifies the request against the signed
+// commitment *before* the GUARDIAN ack, re-executing at the proposal's anchored
+// reference block; `submit_transaction` takes the proposal id to execute at that
+// same anchor, since the collected signatures only authorize the summary produced
+// there.
+let auth_args = client.multisig_auth_args(salt, Some(bound_block_num), None).await?;
+let mut request = build_p2id_transaction_request(
+    account.inner(), recipient, vec![asset], NoteType::Public, P2ideHeights::default(),
+    &auth_args, std::iter::empty(),
+)?;
 let advice = client.prepare_custom_execution(&proposal.id, &request.to_bytes()).await?;
 request.advice_map_mut().extend(advice);
 client.submit_transaction(&proposal.id, request).await?;
 ```
 
-The integration keeps only its own recipe (build inputs + salt) so it can
-reproduce the exact transaction at execute time — the SDK does not store the
-serialized request. The binding check guarantees the rebuilt transaction matches
-the commitment the cosigners signed.
+The integration keeps its own recipe (build inputs + salt + the proposal's anchor
+block) so it can reproduce the exact transaction at execute time — the SDK does
+not store the serialized request. The binding check guarantees the rebuilt
+transaction matches the commitment the cosigners signed.
 
-Every exported transaction builder declares the recipe's salt with
-`TransactionRequestBuilder::fee_conversion_salt`. When the request executes,
-`miden-client` derives the native 1/1 conversion info from that execution's
-reference header and commits it into the auth argument. A producer assembling a
-different custom request directly with `TransactionRequestBuilder` must declare
-its salt the same way.
+Every exported transaction builder takes the `MultisigAuthArgs` and attaches them
+with `TransactionRequestBuilderExt::multisig_auth_args`: the commitment becomes the
+request's auth argument
+and the preimage goes into the advice map, which `miden-client` then leaves alone.
+A producer assembling a different custom request directly with
+`TransactionRequestBuilder` must do the same, and must not call
+`fee_conversion_salt`, which would let `miden-client` commit its own auth arg
+over them (the module docs of `transaction/auth_args.rs` explain what it
+commits today and why that does not fit). An approval expiration
+(1 to 65535 blocks, the furthest a transaction can expire after its reference
+block) is opt-in through `ProposalOptions::approval_expiration_delta` on
+`propose_transaction_with_options`, or the third argument of
+`multisig_auth_args` for a custom request; a rebuild reads the expiration the
+summary binds back with `summary_approval_expiration_block_num`.
 
 ## Delta History
 

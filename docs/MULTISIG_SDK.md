@@ -27,14 +27,14 @@ The multisig sdk has as peer dependency on the miden-sdk, you will need to insta
 
 **TypeScript (npm)**
 ```bash
-npm install @openzeppelin/miden-multisig-client @miden-sdk/miden-sdk@0.16.0
+npm install @openzeppelin/miden-multisig-client @miden-sdk/miden-sdk@0.17.0-rc.3
 ```
 
 **Rust (Cargo.toml)**
 ```toml
 [dependencies]
 miden-multisig-client = "0.17.0"
-miden-client = "=0.16.0"
+miden-client = "=0.17.0-rc.3"
 ```
 
 ### 5-Minute Example
@@ -89,6 +89,22 @@ await multisig.executeProposal(proposal.id);
 
 console.log('Transfer executed!');
 ```
+
+### EIP-712 wallet signing (TypeScript)
+
+`Eip712Signer` accepts a compatible EIP-1193 provider, including a Ledger
+wallet. Connect it to discover the public key, then use it with the same
+`client.load`, proposal creation, `signProposal`, and `executeProposal` calls as
+other signers. `LedgerSigner` remains an alias.
+
+Guardian request authentication uses the `x-auth-format: eip712` header and
+signs `GuardianRequest`. Proposal approvals use `message_format: eip712` on
+the ECDSA signature and sign `MidenTransaction`. These are separate messages
+and signatures; enabling one format does not replace the other.
+
+The proposal ID is the transaction-summary commitment, while the wallet signs
+an EIP-712 digest derived from it. See the TypeScript package README for a
+call-by-call example of the wallet prompts.
 
 ### Prover endpoint and retry policy
 
@@ -315,7 +331,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 A multisig account requires **M-of-N** signatures to authorize transactions:
 - **Threshold (M)**: Minimum signatures required
 - **Signers (N)**: Total number of authorized cosigners
-- **Commitment**: Each signer's Falcon public key commitment (32 bytes, 64 hex chars)
+- **Commitment**: Each signer's public-key commitment (32 bytes, 64 hex chars)
 
 ### Guardian
 
@@ -436,14 +452,26 @@ Rust and TypeScript**:
   proposal with the custom label. They are **not** stored on the server.
   Cosigners then review and sign through the normal flow.
 
-  On a chain whose `verification_base_fee` is non-zero, the request must declare
-  its fee conversion salt. Call `fee_conversion_salt(salt)` in Rust or
-  `withFeeConversionSalt(salt)` in TypeScript. The Miden client derives the native
-  1:1 conversion info from the execution reference header and commits it to the
-  auth argument. The typed proposal builders do this for you. A custom producer
-  must retain the original salt and use it again when rebuilding the request.
-  Do not pass `summaryAuthArg(summary)` to `withFeeConversionSalt`: the summary
-  contains the derived commitment, not the original salt.
+  Since Miden 0.17 the request must carry the multisig auth args: the block its
+  summary binds together with the approval expiration, the salt, and the native
+  1:1 fee conversion info, committed into the auth argument with the preimage in
+  the advice map. In TypeScript, start from
+  `client.feeAwareTransactionRequestBuilder(account, { feeConversionSalt,
+  boundBlockNum, approvalExpirationDelta })` (the delta is 1 to 65535 blocks,
+  the furthest a transaction can expire after its reference block) and never call
+  `withFeeConversionSalt` or `withAuthArg` on it. In Rust, build them with
+  `client.multisig_auth_args(salt, bound_block_num, approval_expiration_delta)`
+  and attach them with `builder.multisig_auth_args(&auth_args)` from
+  `TransactionRequestBuilderExt`; do not
+  declare `fee_conversion_salt`, which would let miden-client commit its own
+  auth arg over them. The typed proposal builders do this for you. A custom producer syncs before
+  building: `propose_custom_transaction` / `createCustomProposal` anchor the
+  proposal at the store's sync height without syncing again, and a request
+  bound to an older block is refused. It must retain the original salt and
+  rebuild at the proposal's anchor block (`ChainAnchor::blockNum` /
+  `ChainAnchor::block_num`) with the expiration the summary binds;
+  `summarySalt(summary)` / `summary_salt(&summary)` read the salt the cosigners
+  signed over for a cross-check.
 - **Execute** — `prepare_custom_execution(proposal_id, transaction_request_bytes)` (Rust) /
   `prepareCustomExecution(proposalId, transactionRequestBytes)` (TS). The SDK verifies the
   proposal is ready, binding-checks the request against the signed commitment
@@ -1860,8 +1888,8 @@ reset stored data: see
 [`MIDEN_COMPATIBILITY.md`](./MIDEN_COMPATIBILITY.md).
 
 Guardian's version and Miden's are not aligned (Guardian 0.16.x runs on Miden
-0.15; Miden 0.16 lands in Guardian 0.17.x), so read that matrix rather than
-matching the numbers. Per-release breaking changes are also in the
+0.15; Miden 0.16 lands in Guardian 0.17.x; Miden 0.17 lands in Guardian 0.18.x),
+so read that matrix rather than matching the numbers. Per-release breaking changes are also in the
 [GitHub release notes](https://github.com/OpenZeppelin/guardian/releases).
 
 ### Contract version pinning
@@ -1880,9 +1908,9 @@ it returns. That settles the linkage question that used to matter here. `auth_tx
 `miden::standards::fee`, so its root depends on whether the standards package is linked
 statically (the callee's MAST is inlined) or dynamically (an external reference is left) —
 compiling an equivalent source locally links dynamically and roots differently, which is
-why a locally built component could not be classified by `AccountComponentInterface::from_procedures`
-and never had fee conversion info attached. Taking the component from upstream removes the
-choice, so the pinned roots describe upstream's build and nothing else.
+why a locally built component could not be classified by `AccountComponentInterface::from_procedures`.
+Taking the component from upstream removes the choice, so the pinned roots describe upstream's
+build and nothing else. The request builders set the three-word multisig auth args themselves.
 
 The exact versions for each Guardian release are in
 [`MIDEN_COMPATIBILITY.md`](./MIDEN_COMPATIBILITY.md#support-matrix); they are not
@@ -1922,7 +1950,7 @@ the mapping is in
 [`MIDEN_COMPATIBILITY.md`](./MIDEN_COMPATIBILITY.md#support-matrix).
 
 Compatibility there is about the on-chain account, not Guardian's stored state.
-Adopting a new Miden line has twice required an irreversible server-side reset, so
+Adopting a new Miden line has three times required an irreversible server-side reset, so
 even an account whose contract version still matches must be re-registered
 afterwards. See
 [`MIDEN_COMPATIBILITY.md`](./MIDEN_COMPATIBILITY.md#data-resets).

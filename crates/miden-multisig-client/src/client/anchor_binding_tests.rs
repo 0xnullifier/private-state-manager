@@ -72,11 +72,12 @@ async fn cosigner_at_a_later_sync_height_verifies_a_pending_proposal_at_its_anch
     let salt = Word::from([5u32, 6, 7, 8]);
     let tx_type =
         TransactionType::consume_notes_v2(vec![note.id()], vec![SerializedNote::from_note(&note)]);
+    let auth_args = proposer.multisig_auth_args(salt, None, None).await.unwrap();
     let tx_request = build_final_transaction_request(
         &proposer.miden_client,
         &tx_type,
         &account,
-        salt,
+        &auth_args,
         Vec::new(),
         None,
         Some(&[]),
@@ -163,11 +164,12 @@ async fn cosigner_at_a_later_sync_height_verifies_a_pending_proposal_at_its_anch
     // Control: the same request re-executed at the cosigner's own tip yields
     // a different commitment, so this test would fail were verification to
     // fall back to the sync height.
+    let auth_args = cosigner.multisig_auth_args(salt, None, None).await.unwrap();
     let tip_request = build_final_transaction_request(
         &cosigner.miden_client,
         &tx_type,
         &account,
-        salt,
+        &auth_args,
         Vec::new(),
         None,
         Some(&[]),
@@ -248,11 +250,12 @@ async fn fresh_cosigner_verifies_a_consume_proposal_whose_proposer_held_the_note
         notes.iter().map(miden_protocol::note::Note::id).collect(),
         notes.iter().map(SerializedNote::from_note).collect(),
     );
+    let auth_args = proposer.multisig_auth_args(salt, None, None).await.unwrap();
     let tx_request = build_final_transaction_request(
         &proposer.miden_client,
         &tx_type,
         &account,
-        salt,
+        &auth_args,
         Vec::new(),
         None,
         Some(&[]),
@@ -450,10 +453,11 @@ async fn listing_reports_an_unverifiable_proposal_instead_of_failing_the_whole_l
     let signers = vec![signer_commitment, new_cosigner];
     let signers_hex: Vec<String> = signers.iter().map(word_to_hex).collect();
     let salt = Word::from([5u32, 6, 7, 8]);
+    let auth_args = client.multisig_auth_args(salt, None, None).await.unwrap();
     let (tx_request, _) = build_update_signers_transaction_request(
         1,
         &signers,
-        salt,
+        &auth_args,
         std::iter::empty(),
         client.key_manager.scheme(),
     )
@@ -472,10 +476,11 @@ async fn listing_reports_an_unverifiable_proposal_instead_of_failing_the_whole_l
             .to_json()
             .to_string()
     };
-    // The healthy proposal and a copy whose served salt is wrong: its
-    // rebuild yields a different summary, so its binding fails. Same
-    // summary bytes, so the same id — GUARDIAN never serves that, so give it
-    // a distinct nonce to keep the two apart in the listing.
+    // The healthy proposal and a copy whose served salt is wrong. Since 0.17
+    // the summary binds the salt itself, so the mismatch is caught by name
+    // before any rebuild. Same summary bytes, so the same id — GUARDIAN never
+    // serves that, so give it a distinct nonce to keep the two apart in the
+    // listing.
     let good = pending_proto_delta(
         &account,
         1,
@@ -521,7 +526,7 @@ async fn listing_reports_an_unverifiable_proposal_instead_of_failing_the_whole_l
                 "a tampered proposal is not worth retrying: {message}"
             );
             assert!(
-                message.contains("metadata does not match tx_summary"),
+                message.contains("metadata salt does not match the salt bound into its tx_summary"),
                 "message: {message}"
             );
         }
@@ -558,10 +563,11 @@ async fn sign_proposal_returns_a_verified_actionable_proposal_after_the_final_si
     let signers = vec![signer_commitment, new_cosigner];
     let signers_hex: Vec<String> = signers.iter().map(word_to_hex).collect();
     let salt = Word::from([5u32, 6, 7, 8]);
+    let auth_args = client.multisig_auth_args(salt, None, None).await.unwrap();
     let (tx_request, _) = build_update_signers_transaction_request(
         1,
         &signers,
-        salt,
+        &auth_args,
         std::iter::empty(),
         client.key_manager.scheme(),
     )
@@ -626,4 +632,95 @@ async fn sign_proposal_returns_a_verified_actionable_proposal_after_the_final_si
         updated.status
     );
     assert!(updated.is_actionable());
+}
+
+/// A custom proposal's request is built by the producer against the store's
+/// sync height and handed over as bytes. Blocks landing on the node in between
+/// must not move the proposal's anchor: `propose_custom_transaction` anchors at
+/// the height the request binds and does not sync first, or the anchor and the
+/// summary would name different blocks and the pair would be refused.
+#[tokio::test]
+async fn custom_proposal_keeps_the_anchor_the_producer_bound_when_the_chain_moves_on() {
+    use guardian_client::PushDeltaProposalResponse;
+    use miden_protocol::utils::serde::Serializable;
+
+    use crate::procedures::ProcedureName;
+
+    let keystore = Arc::new(GuardianKeyStore::generate());
+    let signer_commitment = keystore.commitment();
+    let guardian_commitment = Word::from([9u32, 9, 9, 9]);
+    let account = multisig_account(signer_commitment, guardian_commitment, 48);
+    let api = chain_with_notes(Vec::new());
+
+    let dir = tempfile::tempdir().unwrap();
+    let (mut proposer, _store) =
+        offline_client_parts_with_keystore(dir.path(), api.clone(), None, keystore.clone()).await;
+    proposer.set_node_rpc_client(api.clone());
+    proposer
+        .add_or_update_account(&account, true)
+        .await
+        .unwrap();
+    proposer.account = Some(MultisigAccount::new(account.clone()));
+    proposer.miden_client.sync_state().await.unwrap();
+
+    // The producer's side: sync, then build, bound to the sync height.
+    let bound_height = proposer.miden_client.get_sync_height().await.unwrap();
+    let auth_args = proposer
+        .multisig_auth_args(Word::from([5u32, 6, 7, 8]), None, None)
+        .await
+        .unwrap();
+    let tx_type = TransactionType::UpdateProcedureThreshold {
+        procedure: ProcedureName::SendAsset,
+        new_threshold: 1,
+    };
+    let tx_request = build_final_transaction_request(
+        &proposer.miden_client,
+        &tx_type,
+        &account,
+        &auth_args,
+        Vec::new(),
+        None,
+        None,
+        proposer.key_manager.scheme(),
+    )
+    .await
+    .unwrap();
+    let request_bytes = tx_request.to_bytes();
+
+    // The summary the producer's request yields at the bound height is the
+    // proposal id GUARDIAN has to answer with.
+    let (expected_summary, _) =
+        execute_for_summary(&mut proposer.miden_client, account.id(), tx_request)
+            .await
+            .unwrap();
+    let expected_id = word_to_hex(&expected_summary.to_commitment());
+
+    let service =
+        MockGuardianService::default().with_push_delta_proposal(Ok(PushDeltaProposalResponse {
+            success: true,
+            message: String::new(),
+            commitment: expected_id.clone(),
+            delta: None,
+        }));
+    let handle = service.handle();
+    let endpoint = start_mock_server(service).await.unwrap();
+    handle.set_persistent_get_state(registered_state(&account));
+    proposer
+        .set_guardian_endpoint(&endpoint, false)
+        .await
+        .unwrap();
+
+    // The chain moves on before the producer hands the bytes over.
+    api.advance_blocks(3);
+
+    let proposal = proposer
+        .propose_custom_transaction(&request_bytes, "b2agg")
+        .await
+        .expect("the proposal anchors at the height the request binds, not at the node's tip");
+    assert!(proposal.id.eq_ignore_ascii_case(&expected_id));
+    assert_eq!(
+        proposal.metadata.chain_anchor().unwrap().block_num(),
+        bound_height,
+        "the anchor must name the block the producer bound the request to"
+    );
 }

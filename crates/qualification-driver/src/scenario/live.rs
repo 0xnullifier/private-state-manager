@@ -521,12 +521,9 @@ fn vault_amount(account: &miden_protocol::account::Account, faucet: AccountId) -
     account
         .vault()
         .assets()
-        .filter_map(|asset| match asset {
-            Asset::Fungible(fungible) if fungible.faucet_id() == faucet => {
-                Some(fungible.amount().as_u64())
-            }
-            _ => None,
-        })
+        .filter_map(|asset| asset.as_fungible())
+        .filter(|fungible| fungible.faucet_id() == faucet)
+        .map(|fungible| fungible.amount().as_u64())
         .sum()
 }
 
@@ -1448,10 +1445,22 @@ pub async fn create_custom_proposal(runner: &Runner) -> ActionOutcome {
         return ActionOutcome::failed_setup("the client holds no account to read".to_string());
     };
     let asset = match miden_protocol::asset::FungibleAsset::new(faucet, P2ID_AMOUNT) {
-        Ok(asset) => Asset::Fungible(asset),
+        Ok(asset) => Asset::from(asset),
         Err(error) => {
             return ActionOutcome::failed_setup(format!(
                 "{P2ID_AMOUNT} of {faucet} is not a valid asset: {error}"
+            ));
+        }
+    };
+
+    let auth_args = match session.clients[0]
+        .multisig_auth_args(miden_multisig_client::generate_salt(), None, None)
+        .await
+    {
+        Ok(auth_args) => auth_args,
+        Err(error) => {
+            return ActionOutcome::failed_product(format!(
+                "building the auth args for a custom proposal failed: {error}"
             ));
         }
     };
@@ -1464,7 +1473,7 @@ pub async fn create_custom_proposal(runner: &Runner) -> ActionOutcome {
         vec![asset],
         miden_protocol::note::NoteType::Public,
         miden_multisig_client::P2ideHeights::default(),
-        miden_multisig_client::generate_salt(),
+        &auth_args,
         [],
     ) {
         Ok(request) => request,
