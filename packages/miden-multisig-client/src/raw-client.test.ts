@@ -15,6 +15,7 @@ import {
   getRawMidenClient,
   getTransactionProver,
   requireConfigValue,
+  setRawClientAdapter,
 } from './raw-client.js';
 
 describe('raw-client', () => {
@@ -148,6 +149,33 @@ describe('raw-client', () => {
 
     expect(second).toBe(first);
     expect(mockCreateClient).not.toHaveBeenCalled();
+  });
+
+  it("sends the adapter's operations to the adapter and the rest to the wrapped client", async () => {
+    const inner = { getAccount: vi.fn(async () => 'inner-account'), getSyncHeight: vi.fn(async () => 9) };
+    const { client, withInnerWebClient } = publicClientWrapping(inner);
+    const rawClient = await getRawMidenClient(client as any);
+    // Set after the raw client exists: the adapter is read on each call.
+    const adapter = { getAccount: vi.fn(async () => 'writer-account') };
+    setRawClientAdapter(client as any, adapter as any);
+    const callsBefore = withInnerWebClient.mock.calls.length;
+
+    await expect(rawClient.getAccount('0xabc' as any)).resolves.toBe('writer-account');
+    expect(adapter.getAccount).toHaveBeenCalledWith('0xabc');
+    expect(inner.getAccount).not.toHaveBeenCalled();
+    expect(withInnerWebClient.mock.calls.length).toBe(callsBefore);
+
+    await expect(rawClient.getSyncHeight()).resolves.toBe(9);
+    expect(withInnerWebClient.mock.calls.length).toBe(callsBefore + 1);
+  });
+
+  it('uses the replacement when the adapter is set again', async () => {
+    const { client } = publicClientWrapping({});
+    const rawClient = await getRawMidenClient(client as any);
+    setRawClientAdapter(client as any, { syncState: vi.fn(async () => 'first') } as any);
+    setRawClientAdapter(client as any, { syncState: vi.fn(async () => 'second') } as any);
+
+    await expect(rawClient.syncState()).resolves.toBe('second');
   });
 
   it('uses the public compile resource when available', async () => {
